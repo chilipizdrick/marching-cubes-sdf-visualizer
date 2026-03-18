@@ -1,4 +1,4 @@
-use glam::{Mat3A, Mat4};
+use glam::{Mat3A, Mat4, Vec3A};
 
 use crate::app::transforms::normal_transform;
 
@@ -9,10 +9,11 @@ pub struct Uniforms {
     pub view: Mat4,
     pub proj: Mat4,
     pub normal: Mat3A,
+    pub camera_pos: Vec3A,
 }
 
 impl Uniforms {
-    pub fn new(model: Mat4, view: Mat4, proj: Mat4) -> Self {
+    pub fn new(model: Mat4, view: Mat4, proj: Mat4, camera_pos: Vec3A) -> Self {
         let normal = normal_transform(model);
 
         Self {
@@ -20,6 +21,7 @@ impl Uniforms {
             view,
             proj,
             normal,
+            camera_pos,
         }
     }
 

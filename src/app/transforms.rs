@@ -4,8 +4,8 @@ pub fn model_transform(scale: Vec3A, position: Vec3A, rotation: Quat) -> Mat4 {
     Mat4::from_scale_rotation_translation(scale.into(), rotation, position.into())
 }
 
-pub fn view_transform(eye_pos: Vec3A, target: Vec3A, up: Vec3A) -> Mat4 {
-    let f = (target - eye_pos).normalize();
+pub fn view_transform(camera_pos: Vec3A, target: Vec3A, up: Vec3A) -> Mat4 {
+    let f = (target - camera_pos).normalize();
     let r = f.cross(up).normalize();
     let u = r.cross(f);
 
@@ -13,7 +13,12 @@ pub fn view_transform(eye_pos: Vec3A, target: Vec3A, up: Vec3A) -> Mat4 {
         Vec4::new(r.x, u.x, -f.x, 0.0),
         Vec4::new(r.y, u.y, -f.y, 0.0),
         Vec4::new(r.z, u.z, -f.z, 0.0),
-        Vec4::new(-r.dot(eye_pos), -u.dot(eye_pos), f.dot(eye_pos), 1.0),
+        Vec4::new(
+            -r.dot(camera_pos),
+            -u.dot(camera_pos),
+            f.dot(camera_pos),
+            1.0,
+        ),
     )
 }
 

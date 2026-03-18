@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use egui::epaint::Shadow;
 use egui::{Context, Visuals};
 use egui_wgpu::ScreenDescriptor;
@@ -8,7 +10,7 @@ use egui_wgpu::wgpu::{CommandEncoder, Device, Queue, TextureFormat, TextureView}
 use egui_winit::winit::event::WindowEvent;
 use egui_winit::winit::window::Window;
 
-use crate::app::sdfs::SelectedSdf;
+use crate::app::sdfs::SdfFuction;
 
 pub struct EguiRenderer {
     context: Context,
@@ -110,41 +112,46 @@ impl EguiRenderer {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct State {
     pub x_range: (f32, f32),
     pub y_range: (f32, f32),
     pub z_range: (f32, f32),
     pub delta: (f32, f32, f32),
     pub isovalue: f32,
-    pub mesh_recalculation_requested: bool,
     pub selected_sdf: SelectedSdf,
+    pub sdf_text: String,
+    pub mesh_recalculation_requested: bool,
 }
+
+// const EXAMPLE_SDF: &str = "((x*x+y*y-0.852)^2+(z*z -1.0)^2)*((y*y+z*z-0.852)^2+(x*x-1.0)^2)*((z*z+x*x-0.852)^2+(y*y-1.0)^2)-0.001";
 
 impl Default for State {
     fn default() -> Self {
         Self {
-            x_range: (-1.0, 1.0),
-            y_range: (-1.0, 1.0),
-            z_range: (-1.0, 1.0),
+            x_range: (-1.1, 1.1),
+            y_range: (-1.1, 1.1),
+            z_range: (-1.1, 1.1),
             delta: (0.1, 0.1, 0.1),
             isovalue: 0.0,
-            mesh_recalculation_requested: false,
             selected_sdf: Default::default(),
+            sdf_text: "x^2 + y^2 + z^2 - 1".to_string(),
+            mesh_recalculation_requested: false,
         }
     }
 }
 
 pub fn main_window(ui: &Context, state: &mut State) {
     egui::Window::new("SDF Visualizer")
-        .default_open(false)
+        .default_open(true)
         .vscroll(true)
-        .max_width(300.0)
+        .max_width(500.0)
         .max_height(800.0)
         .default_width(300.0)
         .resizable(true)
         .show(ui, |ui| {
             ui.heading("Grid Settings");
+
             ui.horizontal_wrapped(|ui| {
                 ui.label("X from");
                 ui.add(egui::DragValue::new(&mut state.x_range.0).speed(0.1));
@@ -171,41 +178,76 @@ pub fn main_window(ui: &Context, state: &mut State) {
                 ui.label("Z");
                 ui.add(egui::DragValue::new(&mut state.delta.2).speed(0.1));
             });
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Isovalue");
-                ui.add(egui::DragValue::new(&mut state.isovalue).speed(0.1))
-            });
+
+            ui.separator();
+
+            ui.heading("SDF Settings");
 
             ui.horizontal_wrapped(|ui| {
-                ui.label("Selected SDF:");
-                egui::ComboBox::from_label("Selected SDF")
+                egui::ComboBox::from_label("SDF")
                     .selected_text(state.selected_sdf.to_string())
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
                             &mut state.selected_sdf,
-                            SelectedSdf::Sphere,
-                            SelectedSdf::Sphere.to_string(),
+                            SelectedSdf::PreDefined(SdfFuction::Sphere),
+                            SdfFuction::Sphere.to_string(),
                         );
                         ui.selectable_value(
                             &mut state.selected_sdf,
-                            SelectedSdf::Plane,
-                            SelectedSdf::Plane.to_string(),
+                            SelectedSdf::PreDefined(SdfFuction::Plane),
+                            SdfFuction::Plane.to_string(),
                         );
                         ui.selectable_value(
                             &mut state.selected_sdf,
-                            SelectedSdf::Octahedron,
-                            SelectedSdf::Octahedron.to_string(),
+                            SelectedSdf::PreDefined(SdfFuction::Octahedron),
+                            SdfFuction::Octahedron.to_string(),
                         );
                         ui.selectable_value(
                             &mut state.selected_sdf,
-                            SelectedSdf::CoolSdf,
-                            SelectedSdf::CoolSdf.to_string(),
+                            SelectedSdf::PreDefined(SdfFuction::CubeRingFrame),
+                            SdfFuction::CubeRingFrame.to_string(),
                         );
-                    })
+                        ui.selectable_value(
+                            &mut state.selected_sdf,
+                            SelectedSdf::Custom,
+                            "Custom".to_string(),
+                        );
+                    });
             });
 
-            if ui.button("Recalculate SDF mesh").clicked() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Isovalue:");
+                ui.add(egui::DragValue::new(&mut state.isovalue).speed(0.1))
+            });
+
+            if state.selected_sdf == SelectedSdf::Custom {
+                ui.label("Custom SDF:");
+                ui.text_edit_multiline(&mut state.sdf_text);
+            }
+
+            if ui.button("Recalculate mesh").clicked() {
                 state.mesh_recalculation_requested = true;
             };
         });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SelectedSdf {
+    PreDefined(SdfFuction),
+    Custom,
+}
+
+impl Default for SelectedSdf {
+    fn default() -> Self {
+        Self::PreDefined(Default::default())
+    }
+}
+
+impl Display for SelectedSdf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SelectedSdf::PreDefined(sdf) => write!(f, "{}", sdf),
+            SelectedSdf::Custom => write!(f, "Custom"),
+        }
+    }
 }

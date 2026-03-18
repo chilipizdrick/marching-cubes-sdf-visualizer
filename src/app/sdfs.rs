@@ -1,27 +1,32 @@
 use std::fmt::Display;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub enum SelectedSdf {
+pub enum SdfFuction {
     #[default]
     Sphere,
     Plane,
     Octahedron,
-    CoolSdf,
+    CubeRingFrame,
 }
 
-impl Display for SelectedSdf {
+impl Display for SdfFuction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        match self {
+            SdfFuction::Sphere => write!(f, "Sphere"),
+            SdfFuction::Plane => write!(f, "Plane"),
+            SdfFuction::Octahedron => write!(f, "Octahedron"),
+            SdfFuction::CubeRingFrame => write!(f, "Cube Ring Frame"),
+        }
     }
 }
 
-impl SelectedSdf {
+impl SdfFuction {
     pub fn sdf_fn(&self) -> fn(f32, f32, f32) -> f32 {
         match self {
-            SelectedSdf::Sphere => sphere,
-            SelectedSdf::Plane => plane,
-            SelectedSdf::Octahedron => cube,
-            SelectedSdf::CoolSdf => cool_sdf,
+            SdfFuction::Sphere => sphere,
+            SdfFuction::Plane => plane,
+            SdfFuction::Octahedron => cube,
+            SdfFuction::CubeRingFrame => cool_sdf,
         }
     }
 }

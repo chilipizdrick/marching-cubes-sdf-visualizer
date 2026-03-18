@@ -6,10 +6,12 @@ mod transforms;
 mod uniforms;
 mod vertex;
 
-use std::{sync::Arc, time::Instant};
+use std::{rc::Rc, sync::Arc, time::Instant};
 
+use bumpalo::Bump;
 use bytemuck::bytes_of;
 use egui_wgpu::ScreenDescriptor;
+use exp_rs::{EvalContext, Expression, error::ExprError};
 use glam::{Quat, Vec3A};
 use wgpu::{VertexBufferLayout, util::DeviceExt};
 use winit::{
@@ -20,7 +22,7 @@ use winit::{
 };
 
 use crate::app::{
-    gui::EguiRenderer,
+    gui::{EguiRenderer, SelectedSdf},
     mesh::Grid,
     textures::{ColorTexture, DepthTexture},
     transforms::{model_transform, projection_transform, view_transform},
@@ -115,12 +117,14 @@ impl State<'_> {
 
         surface.configure(&device, &surface_config);
 
+        let camera_pos = Vec3A::splat(3.0);
+
         let model = model_transform(Vec3A::ONE, Vec3A::ZERO, Quat::IDENTITY);
-        let view = view_transform(Vec3A::splat(3.0), Vec3A::ZERO, Vec3A::Z);
+        let view = view_transform(camera_pos, Vec3A::ZERO, Vec3A::Z);
         let aspect_ratio = window_size.width as f32 / window_size.height as f32;
         let proj = projection_transform(std::f32::consts::PI / 2.0, aspect_ratio, 0.1, 100.0);
 
-        let uniforms = Uniforms::new(model, view, proj);
+        let uniforms = Uniforms::new(model, view, proj, camera_pos);
         let uniforms_buffer_desc = wgpu::util::BufferInitDescriptor {
             label: Some("Uniforms Buffer"),
             contents: bytemuck::bytes_of(&uniforms),
@@ -162,7 +166,7 @@ impl State<'_> {
 
         let egui = EguiRenderer::new(&device, texture_format, &window);
 
-        let mesh = calculate_mesh(&egui.state);
+        let mesh = calculate_mesh(&egui.state).unwrap();
 
         let vertex_buffer_desc = wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
@@ -361,14 +365,20 @@ impl State<'_> {
     fn update_state(&mut self) {
         let radius = 3.0;
         let camera_pos = Vec3A::new(radius * self.time.cos(), radius * self.time.sin(), 1.5);
+        self.uniforms.camera_pos = camera_pos;
         self.uniforms.view = view_transform(camera_pos, Vec3A::ZERO, Vec3A::Z);
 
         let gui_state = &mut self.egui.state;
         if gui_state.mesh_recalculation_requested {
             gui_state.mesh_recalculation_requested = false;
 
-            self.mesh = calculate_mesh(gui_state);
-            self.update_buffers();
+            match calculate_mesh(gui_state) {
+                Ok(mesh) => {
+                    self.mesh = mesh;
+                    self.update_buffers();
+                }
+                Err(e) => log::error!("Error calculating mesh: {}", e),
+            }
         }
     }
 
@@ -424,7 +434,7 @@ fn wgpu_instance() -> wgpu::Instance {
     wgpu::Instance::new(&desc)
 }
 
-fn calculate_mesh(gui_state: &gui::State) -> MeshData {
+fn calculate_mesh(gui_state: &gui::State) -> Result<MeshData, ExprError> {
     let mut grid = Grid::builder()
         .x_range(gui_state.x_range)
         .y_range(gui_state.y_range)
@@ -433,10 +443,33 @@ fn calculate_mesh(gui_state: &gui::State) -> MeshData {
         .build()
         .unwrap();
 
-    let sdf = gui_state.selected_sdf.sdf_fn();
     let isovalue = gui_state.isovalue;
 
-    let mesh = grid.generate_mesh(sdf, isovalue);
+    let mesh = match gui_state.selected_sdf {
+        SelectedSdf::PreDefined(sdf) => {
+            let mut sdf_fn = sdf.sdf_fn();
+            grid.generate_mesh(&mut sdf_fn, isovalue)
+        }
+        SelectedSdf::Custom => {
+            let arena = Bump::new();
+            let ctx = Rc::new(EvalContext::new());
+            let mut builder = Expression::new(&arena);
+            builder.add_parameter("x", 0.0).unwrap();
+            builder.add_parameter("y", 0.0).unwrap();
+            builder.add_parameter("z", 0.0).unwrap();
+            builder.add_expression(&gui_state.sdf_text)?;
+
+            let mut sdf_fn = |x, y, z| {
+                builder.set("x", x as f64).unwrap();
+                builder.set("y", y as f64).unwrap();
+                builder.set("z", z as f64).unwrap();
+                builder.eval(&ctx).unwrap();
+                builder.get_result(0).unwrap() as f32
+            };
+
+            grid.generate_mesh(&mut sdf_fn, isovalue)
+        }
+    };
 
     log::info!(
         "Generated mesh with {} vertices and {} indices",
@@ -444,5 +477,5 @@ fn calculate_mesh(gui_state: &gui::State) -> MeshData {
         mesh.indices.len()
     );
 
-    mesh
+    Ok(mesh)
 }

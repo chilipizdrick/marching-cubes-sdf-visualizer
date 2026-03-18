@@ -56,7 +56,8 @@ const VERT_OFFSET: [[usize; 3]; 8] = [
     [0, 1, 1],
 ];
 
-pub type Sdf = fn(f32, f32, f32) -> f32;
+// pub type Sdf = fn(f32, f32, f32) -> f32;
+pub type Sdf<'a> = &'a mut dyn FnMut(f32, f32, f32) -> f32;
 
 #[derive(Default)]
 pub struct GridBuilder {
@@ -220,7 +221,6 @@ use std::collections::HashMap;
 
 impl Grid {
     pub fn generate_mesh(&mut self, sdf: Sdf, isovalue: f32) -> MeshData {
-        // Pre-evaluate the grid (Assuming self.set_voxel logic remains the same)
         for k in 0..self.z_len {
             for j in 0..self.y_len {
                 for i in 0..self.x_len {
@@ -232,7 +232,6 @@ impl Grid {
 
         let mut mesh = MeshData::new();
 
-        // Cache mapping a unique edge (sorted tuple of two grid coordinates) to a vertex index
         let mut vertex_cache: HashMap<([usize; 3], [usize; 3]), u32> = HashMap::new();
 
         for k in 0..self.z_len - 1 {
@@ -243,11 +242,10 @@ impl Grid {
 
                     if edges == 0 {
                         continue;
-                    } // Air or solid cube, no surface
+                    }
 
                     let mut active_edge_indices = [0u32; 12];
 
-                    // 1. Resolve vertices for active edges
                     for e in 0..12 {
                         if (edges & (1 << e)) != 0 {
                             let (start, end) = EDGE_VERTS[e];
@@ -263,18 +261,15 @@ impl Grid {
                                 k + VERT_OFFSET[end][2],
                             ];
 
-                            // Sort coordinates so the key is identical regardless of which voxel requests it
                             let edge_key = if v1_coord < v2_coord {
                                 (v1_coord, v2_coord)
                             } else {
                                 (v2_coord, v1_coord)
                             };
 
-                            // Check cache first
                             if let Some(&idx) = vertex_cache.get(&edge_key) {
                                 active_edge_indices[e] = idx;
                             } else {
-                                // Cache miss: Calculate new vertex and normal
                                 let p1 = Vec3A::new(
                                     self.x_value(v1_coord[0]),
                                     self.y_value(v1_coord[1]),
@@ -305,7 +300,6 @@ impl Grid {
                         }
                     }
 
-                    // 2. Build triangles using the resolved indices
                     let triangles = &TRI_TABLE[cube_idx];
                     let mut tri_idx = 0;
 
@@ -331,7 +325,7 @@ fn interpolate_vertex(isovalue: f32, p1: Vec3A, p2: Vec3A, value_p1: f32, value_
     const EPS: f32 = 1e-6;
     if (value_p2 - value_p1).abs() < EPS {
         return p1;
-    } // Prevent NaN
+    }
     let mu = (isovalue - value_p1) / (value_p2 - value_p1);
     p1 + mu * (p2 - p1)
 }
@@ -344,6 +338,5 @@ fn calculate_normal(sdf: Sdf, p: Vec3A) -> Vec3A {
     let ny = sdf(p.x, p.y + EPS, p.z) - sdf(p.x, p.y - EPS, p.z);
     let nz = sdf(p.x, p.y, p.z + EPS) - sdf(p.x, p.y, p.z - EPS);
 
-    // Normalize the gradient vector. glam handles the division by the magnitude.
     Vec3A::new(nx, ny, nz).normalize_or_zero()
 }
