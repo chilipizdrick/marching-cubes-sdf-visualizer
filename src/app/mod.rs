@@ -1,5 +1,6 @@
 mod gui;
 mod mesh;
+mod raw_loader;
 mod sdfs;
 mod textures;
 mod transforms;
@@ -16,14 +17,16 @@ use glam::{Quat, Vec3A};
 use wgpu::{VertexBufferLayout, util::DeviceExt};
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    dpi::{PhysicalPosition, PhysicalSize},
+    event::{MouseScrollDelta, WindowEvent},
     event_loop::ActiveEventLoop,
     window::{Window, WindowAttributes, WindowId},
 };
 
 use crate::app::{
     gui::{EguiRenderer, SelectedSdf},
-    mesh::Grid,
+    mesh::{Grid, GridBuilder},
+    raw_loader::ScalarField,
     textures::{ColorTexture, DepthTexture},
     transforms::{model_transform, projection_transform, view_transform},
     uniforms::Uniforms,
@@ -74,6 +77,7 @@ struct State<'a> {
 
     time: f32,
     last_update: Instant,
+    camera_radius: f32,
 
     egui: EguiRenderer,
 
@@ -166,7 +170,11 @@ impl State<'_> {
 
         let egui = EguiRenderer::new(&device, texture_format, &window);
 
-        let mesh = calculate_mesh(&egui.state).unwrap();
+        let mesh = if std::env::args().len() > 1 {
+            calculate_mesh_from_scalar_field()
+        } else {
+            calculate_mesh(&egui.state).unwrap()
+        };
 
         let vertex_buffer_desc = wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
@@ -258,6 +266,8 @@ impl State<'_> {
             time,
             last_update,
 
+            camera_radius: 3.0,
+
             egui,
 
             mesh,
@@ -341,10 +351,13 @@ impl State<'_> {
 
         self.update_time();
 
+        // log::info!("Window event: {event:?}");
+
         match event {
             WE::CloseRequested => event_loop.exit(),
             WE::Resized(size) => self.handle_window_resized(size),
             WE::RedrawRequested => self.render(),
+            WE::MouseWheel { delta, .. } => self.handle_mouse_wheel(delta),
 
             _ => {}
         }
@@ -362,9 +375,18 @@ impl State<'_> {
         self.last_update = now;
     }
 
+    fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        let PhysicalSize { height, .. } = self.window.inner_size();
+        let multiplier = multiplier_from_mouse_delta(delta, height as f32);
+        self.camera_radius *= multiplier;
+    }
+
     fn update_state(&mut self) {
-        let radius = 3.0;
-        let camera_pos = Vec3A::new(radius * self.time.cos(), radius * self.time.sin(), 1.5);
+        let camera_pos = Vec3A::new(
+            self.camera_radius * self.time.cos(),
+            self.camera_radius * self.time.sin(),
+            1.5,
+        );
         self.uniforms.camera_pos = camera_pos;
         self.uniforms.view = view_transform(camera_pos, Vec3A::ZERO, Vec3A::Z);
 
@@ -448,7 +470,7 @@ fn calculate_mesh(gui_state: &gui::State) -> Result<MeshData, ExprError> {
     let mesh = match gui_state.selected_sdf {
         SelectedSdf::PreDefined(sdf) => {
             let mut sdf_fn = sdf.sdf_fn();
-            grid.generate_mesh(&mut sdf_fn, isovalue)
+            grid.generate_mesh_from_fn(&mut sdf_fn, isovalue)
         }
         SelectedSdf::Custom => {
             let arena = Bump::new();
@@ -467,7 +489,7 @@ fn calculate_mesh(gui_state: &gui::State) -> Result<MeshData, ExprError> {
                 builder.get_result(0).unwrap() as f32
             };
 
-            grid.generate_mesh(&mut sdf_fn, isovalue)
+            grid.generate_mesh_from_fn(&mut sdf_fn, isovalue)
         }
     };
 
@@ -478,4 +500,50 @@ fn calculate_mesh(gui_state: &gui::State) -> Result<MeshData, ExprError> {
     );
 
     Ok(mesh)
+}
+
+fn calculate_mesh_from_scalar_field() -> MeshData {
+    let args: Vec<String> = std::env::args().collect();
+    let field_x_len = args[2].parse().unwrap();
+    let field_y_len = args[3].parse().unwrap();
+    let field_z_len = args[4].parse().unwrap();
+
+    let field = ScalarField::read_from_u8_yzx_file_with_size(
+        &args[1],
+        field_x_len,
+        field_y_len,
+        field_z_len,
+    )
+    .unwrap();
+
+    let mut grid = GridBuilder::new()
+        .x_range((-1.0, 1.0))
+        .y_range((-1.0, 1.0))
+        .z_range((-1.0, 1.0))
+        .xyz_delta((
+            2.0 / (field_x_len - 1) as f32,
+            2.0 / (field_y_len - 1) as f32,
+            2.0 / (field_z_len - 1) as f32,
+        ))
+        .build()
+        .unwrap();
+
+    grid.generate_mesh_from_scalar_field(field, 0.5)
+}
+
+fn multiplier_from_mouse_delta(delta: MouseScrollDelta, window_height: f32) -> f32 {
+    const PIXEL_DELTA_SCROLL_SENSITIVITY: f32 = 5.0;
+
+    match delta {
+        MouseScrollDelta::LineDelta(_, y) => match y {
+            ..0.0 => 0.9,
+            0.0.. => 1.1,
+            _ => 1.0,
+        },
+        MouseScrollDelta::PixelDelta(PhysicalPosition { y, .. }) => match y {
+            ..0.0 => 1.0 - (y as f32 / window_height * PIXEL_DELTA_SCROLL_SENSITIVITY).abs(),
+            0.0.. => 1.0 + (y as f32 / window_height * PIXEL_DELTA_SCROLL_SENSITIVITY).abs(),
+            _ => 1.0,
+        },
+    }
 }

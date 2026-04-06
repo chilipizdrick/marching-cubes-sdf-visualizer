@@ -24,9 +24,14 @@
 
 mod lookup_tables;
 
+use std::collections::HashMap;
+
 use glam::Vec3A;
 
-use crate::app::vertex::{MeshData, Vertex};
+use crate::app::{
+    raw_loader::ScalarField,
+    vertex::{MeshData, Vertex},
+};
 
 use self::lookup_tables::*;
 
@@ -56,8 +61,7 @@ const VERT_OFFSET: [[usize; 3]; 8] = [
     [0, 1, 1],
 ];
 
-// pub type Sdf = fn(f32, f32, f32) -> f32;
-pub type Sdf<'a> = &'a mut dyn FnMut(f32, f32, f32) -> f32;
+pub type SdfFn<'a> = &'a mut dyn FnMut(f32, f32, f32) -> f32;
 
 #[derive(Default)]
 pub struct GridBuilder {
@@ -215,12 +219,8 @@ impl Grid {
 
         idx
     }
-}
 
-use std::collections::HashMap;
-
-impl Grid {
-    pub fn generate_mesh(&mut self, sdf: Sdf, isovalue: f32) -> MeshData {
+    fn populate_from_fn(&mut self, sdf: SdfFn, isovalue: f32) {
         for k in 0..self.z_len {
             for j in 0..self.y_len {
                 for i in 0..self.x_len {
@@ -229,6 +229,23 @@ impl Grid {
                 }
             }
         }
+    }
+
+    fn populate_from_scalar_field(&mut self, field: &ScalarField, isovalue: f32) {
+        for k in 0..self.z_len {
+            for j in 0..self.y_len {
+                for i in 0..self.x_len {
+                    let val = field[(i, j, k)];
+                    self.set_voxel(i, j, k, val >= isovalue);
+                }
+            }
+        }
+    }
+}
+
+impl Grid {
+    pub fn generate_mesh_from_fn(&mut self, sdf: SdfFn, isovalue: f32) -> MeshData {
+        self.populate_from_fn(sdf, isovalue);
 
         let mut mesh = MeshData::new();
 
@@ -318,6 +335,104 @@ impl Grid {
 
         mesh
     }
+
+    pub fn generate_mesh_from_scalar_field(
+        &mut self,
+        field: ScalarField,
+        isovalue: f32,
+    ) -> MeshData {
+        self.populate_from_scalar_field(&field, isovalue);
+
+        let mut mesh = MeshData::new();
+
+        let mut vertex_cache: HashMap<([usize; 3], [usize; 3]), u32> = HashMap::new();
+
+        for k in 0..self.z_len - 1 {
+            for j in 0..self.y_len - 1 {
+                for i in 0..self.x_len - 1 {
+                    let cube_idx = self.cube_index(i, j, k) as usize;
+                    let edges = EDGE_TABLE[cube_idx];
+
+                    if edges == 0 {
+                        continue;
+                    }
+
+                    let mut active_edge_indices = [0u32; 12];
+
+                    for e in 0..12 {
+                        if (edges & (1 << e)) != 0 {
+                            let (start, end) = EDGE_VERTS[e];
+
+                            let v1_coord = [
+                                i + VERT_OFFSET[start][0],
+                                j + VERT_OFFSET[start][1],
+                                k + VERT_OFFSET[start][2],
+                            ];
+                            let v2_coord = [
+                                i + VERT_OFFSET[end][0],
+                                j + VERT_OFFSET[end][1],
+                                k + VERT_OFFSET[end][2],
+                            ];
+
+                            let edge_key = if v1_coord < v2_coord {
+                                (v1_coord, v2_coord)
+                            } else {
+                                (v2_coord, v1_coord)
+                            };
+
+                            if let Some(&idx) = vertex_cache.get(&edge_key) {
+                                active_edge_indices[e] = idx;
+                            } else {
+                                let p1 = Vec3A::new(
+                                    self.x_value(v1_coord[0]),
+                                    self.y_value(v1_coord[1]),
+                                    self.z_value(v1_coord[2]),
+                                );
+                                let p2 = Vec3A::new(
+                                    self.x_value(v2_coord[0]),
+                                    self.y_value(v2_coord[1]),
+                                    self.z_value(v2_coord[2]),
+                                );
+
+                                let value_p1 = field[v1_coord.into()];
+                                let value_p2 = field[v2_coord.into()];
+
+                                let vert_position =
+                                    interpolate_vertex(isovalue, p1, p2, value_p1, value_p2);
+                                let normal = calculate_normal_scalar_field(
+                                    &field,
+                                    v1_coord.into(),
+                                    self.delta,
+                                );
+
+                                let new_idx = mesh.vertices.len() as u32;
+                                let vertex = Vertex::new(vert_position, normal);
+                                mesh.vertices.push(vertex);
+
+                                vertex_cache.insert(edge_key, new_idx);
+                                active_edge_indices[e] = new_idx;
+                            }
+                        }
+                    }
+
+                    let triangles = &TRI_TABLE[cube_idx];
+                    let mut tri_idx = 0;
+
+                    while triangles[tri_idx] != -1 {
+                        mesh.indices
+                            .push(active_edge_indices[triangles[tri_idx] as usize]);
+                        mesh.indices
+                            .push(active_edge_indices[triangles[tri_idx + 1] as usize]);
+                        mesh.indices
+                            .push(active_edge_indices[triangles[tri_idx + 2] as usize]);
+                        tri_idx += 3;
+                    }
+                }
+            }
+        }
+
+        mesh
+    }
 }
 
 #[inline]
@@ -331,12 +446,32 @@ fn interpolate_vertex(isovalue: f32, p1: Vec3A, p2: Vec3A, value_p1: f32, value_
 }
 
 #[inline]
-fn calculate_normal(sdf: Sdf, p: Vec3A) -> Vec3A {
+fn calculate_normal(sdf: SdfFn, p: Vec3A) -> Vec3A {
     const EPS: f32 = 0.001; // A small delta for the finite difference
 
     let nx = sdf(p.x + EPS, p.y, p.z) - sdf(p.x - EPS, p.y, p.z);
     let ny = sdf(p.x, p.y + EPS, p.z) - sdf(p.x, p.y - EPS, p.z);
     let nz = sdf(p.x, p.y, p.z + EPS) - sdf(p.x, p.y, p.z - EPS);
+
+    Vec3A::new(nx, ny, nz).normalize_or_zero()
+}
+
+#[inline]
+fn calculate_normal_scalar_field(
+    field: &ScalarField,
+    index: (usize, usize, usize),
+    delta: (f32, f32, f32),
+) -> Vec3A {
+    let index_x1 = (index.0.saturating_add(1), index.1, index.2);
+    let index_x2 = (index.0.saturating_sub(1), index.1, index.2);
+    let index_y1 = (index.0, index.1.saturating_add(1), index.2);
+    let index_y2 = (index.0, index.1.saturating_sub(1), index.2);
+    let index_z1 = (index.0, index.1, index.2.saturating_add(1));
+    let index_z2 = (index.0, index.1, index.2.saturating_sub(1));
+
+    let nx = (field[index_x1] - field[index_x2]) / delta.0;
+    let ny = (field[index_y1] - field[index_y2]) / delta.1;
+    let nz = (field[index_z1] - field[index_z2]) / delta.2;
 
     Vec3A::new(nx, ny, nz).normalize_or_zero()
 }

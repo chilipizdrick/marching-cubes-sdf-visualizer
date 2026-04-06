@@ -143,7 +143,7 @@ impl Default for State {
 
 pub fn main_window(ui: &Context, state: &mut State) {
     egui::Window::new("SDF Visualizer")
-        .default_open(true)
+        .default_open(false)
         .vscroll(true)
         .max_width(500.0)
         .max_height(800.0)
@@ -177,6 +177,17 @@ pub fn main_window(ui: &Context, state: &mut State) {
                 ui.add(egui::DragValue::new(&mut state.delta.1).speed(0.1));
                 ui.label("Z");
                 ui.add(egui::DragValue::new(&mut state.delta.2).speed(0.1));
+            });
+
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Shared Delta");
+                if ui
+                    .add(egui::DragValue::new(&mut state.delta.0).speed(0.1))
+                    .changed()
+                {
+                    state.delta.1 = state.delta.0;
+                    state.delta.2 = state.delta.0;
+                }
             });
 
             ui.separator();
