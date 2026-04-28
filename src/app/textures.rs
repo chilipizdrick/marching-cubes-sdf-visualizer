@@ -30,13 +30,13 @@ impl DepthTexture {
     }
 }
 
-pub struct ColorTexture {
+pub struct MSAATexture {
     #[allow(unused)]
     texture: wgpu::Texture,
     pub view: wgpu::TextureView,
 }
 
-impl ColorTexture {
+impl MSAATexture {
     pub fn new(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> Self {
         let size = wgpu::Extent3d {
             width: config.width.max(1),
@@ -44,7 +44,7 @@ impl ColorTexture {
             depth_or_array_layers: 1,
         };
         let texture_desc = wgpu::TextureDescriptor {
-            label: Some("MSAA Color Texture"),
+            label: Some("MSAA Texture"),
             size,
             mip_level_count: 1,
             sample_count: 4,

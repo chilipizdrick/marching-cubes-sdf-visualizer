@@ -1,22 +1,23 @@
-use std::fmt::Display;
-
-use egui::epaint::Shadow;
-use egui::{Context, Visuals};
+use egui::Context;
+use egui::global_theme_preference_switch;
+use egui_wgpu::Renderer;
 use egui_wgpu::ScreenDescriptor;
-use egui_wgpu::{Renderer, RendererOptions};
 
 use egui_wgpu::wgpu;
 use egui_wgpu::wgpu::{CommandEncoder, Device, Queue, TextureFormat, TextureView};
+use egui_winit::EventResponse;
 use egui_winit::winit::event::WindowEvent;
 use egui_winit::winit::window::Window;
 
-use crate::app::sdfs::SdfFuction;
+use crate::app::State;
+use crate::app::marching_cubes::GenerationMethod;
+use crate::app::sdf_functions::SdfFuction;
+use crate::app::state::VisualizationMode;
 
 pub struct EguiRenderer {
-    context: Context,
-    window_state: egui_winit::State,
-    renderer: Renderer,
-    pub state: State,
+    pub context: Context,
+    pub window_state: egui_winit::State,
+    pub renderer: Renderer,
 }
 
 impl EguiRenderer {
@@ -27,32 +28,20 @@ impl EguiRenderer {
     ) -> EguiRenderer {
         let context = Context::default();
         let viewport_id = context.viewport_id();
-
-        let visuals = Visuals {
-            dark_mode: true,
-            window_shadow: Shadow::NONE,
-            ..Default::default()
-        };
-
-        context.set_visuals(visuals);
-
         let window_state =
             egui_winit::State::new(context.clone(), viewport_id, &window, None, None, None);
-        let state = State::default();
-
-        let renderer_options = RendererOptions::default();
+        let renderer_options = Default::default();
         let renderer = Renderer::new(device, output_texture_format, renderer_options);
 
         EguiRenderer {
             context,
             window_state,
             renderer,
-            state,
         }
     }
 
-    pub fn handle_input(&mut self, window: &Window, event: &WindowEvent) {
-        let _ = self.window_state.on_window_event(window, event);
+    pub fn handle_input(&mut self, window: &Window, event: &WindowEvent) -> EventResponse {
+        self.window_state.on_window_event(window, event)
     }
 
     pub fn draw(
@@ -63,12 +52,11 @@ impl EguiRenderer {
         window: &Window,
         window_surface_view: &TextureView,
         screen_descriptor: ScreenDescriptor,
-        mut run_ui: impl FnMut(&Context, &mut State),
+        state: &mut State,
     ) {
-        // self.state.set_pixels_per_point(window.scale_factor() as f32);
         let raw_input = self.window_state.take_egui_input(window);
-        let full_output = self.context.run(raw_input, |ctx| {
-            run_ui(ctx, &mut self.state);
+        let full_output = self.context.run_ui(raw_input, |ctx| {
+            run_ui(ctx, state);
         });
 
         self.window_state
@@ -97,9 +85,10 @@ impl EguiRenderer {
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
-                label: Some("Egui Main Render Pass"),
+                label: Some("Egui Render Pass"),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             let mut rpass = rpass.forget_lifetime();
@@ -112,153 +101,206 @@ impl EguiRenderer {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct State {
-    pub x_range: (f32, f32),
-    pub y_range: (f32, f32),
-    pub z_range: (f32, f32),
-    pub delta: (f32, f32, f32),
-    pub isovalue: f32,
-    pub selected_sdf: SelectedSdf,
-    pub sdf_text: String,
-    pub mesh_recalculation_requested: bool,
-}
-
-// const EXAMPLE_SDF: &str = "((x*x+y*y-0.852)^2+(z*z -1.0)^2)*((y*y+z*z-0.852)^2+(x*x-1.0)^2)*((z*z+x*x-0.852)^2+(y*y-1.0)^2)-0.001";
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            x_range: (-1.1, 1.1),
-            y_range: (-1.1, 1.1),
-            z_range: (-1.1, 1.1),
-            delta: (0.1, 0.1, 0.1),
-            isovalue: 0.0,
-            selected_sdf: Default::default(),
-            sdf_text: "x^2 + y^2 + z^2 - 1".to_string(),
-            mesh_recalculation_requested: false,
-        }
-    }
-}
-
-pub fn main_window(ui: &Context, state: &mut State) {
+fn run_ui(ctx: &Context, state: &mut State) {
     egui::Window::new("SDF Visualizer")
-        .default_open(false)
         .vscroll(true)
-        .max_width(500.0)
-        .max_height(800.0)
-        .default_width(300.0)
         .resizable(true)
-        .show(ui, |ui| {
-            ui.heading("Grid Settings");
-
-            ui.horizontal_wrapped(|ui| {
-                ui.label("X from");
-                ui.add(egui::DragValue::new(&mut state.x_range.0).speed(0.1));
-                ui.label("to");
-                ui.add(egui::DragValue::new(&mut state.x_range.1).speed(0.1));
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Y from");
-                ui.add(egui::DragValue::new(&mut state.y_range.0).speed(0.1));
-                ui.label("to");
-                ui.add(egui::DragValue::new(&mut state.y_range.1).speed(0.1));
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Z from");
-                ui.add(egui::DragValue::new(&mut state.z_range.0).speed(0.1));
-                ui.label("to");
-                ui.add(egui::DragValue::new(&mut state.z_range.1).speed(0.1));
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Delta: X");
-                ui.add(egui::DragValue::new(&mut state.delta.0).speed(0.1));
-                ui.label("Y");
-                ui.add(egui::DragValue::new(&mut state.delta.1).speed(0.1));
-                ui.label("Z");
-                ui.add(egui::DragValue::new(&mut state.delta.2).speed(0.1));
-            });
-
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Shared Delta");
-                if ui
-                    .add(egui::DragValue::new(&mut state.delta.0).speed(0.1))
-                    .changed()
-                {
-                    state.delta.1 = state.delta.0;
-                    state.delta.2 = state.delta.0;
-                }
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                global_theme_preference_switch(ui);
+                ui.selectable_value(
+                    &mut state.visualization_mode,
+                    VisualizationMode::Fn,
+                    "Function",
+                );
+                ui.selectable_value(
+                    &mut state.visualization_mode,
+                    VisualizationMode::LoadFromFile,
+                    "Load from file",
+                );
+                ui.selectable_value(
+                    &mut state.visualization_mode,
+                    VisualizationMode::SpinodalDecomposition,
+                    "Spinodal Decomposition",
+                );
             });
 
             ui.separator();
 
-            ui.heading("SDF Settings");
-
-            ui.horizontal_wrapped(|ui| {
-                egui::ComboBox::from_label("SDF")
-                    .selected_text(state.selected_sdf.to_string())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut state.selected_sdf,
-                            SelectedSdf::PreDefined(SdfFuction::Sphere),
-                            SdfFuction::Sphere.to_string(),
-                        );
-                        ui.selectable_value(
-                            &mut state.selected_sdf,
-                            SelectedSdf::PreDefined(SdfFuction::Plane),
-                            SdfFuction::Plane.to_string(),
-                        );
-                        ui.selectable_value(
-                            &mut state.selected_sdf,
-                            SelectedSdf::PreDefined(SdfFuction::Octahedron),
-                            SdfFuction::Octahedron.to_string(),
-                        );
-                        ui.selectable_value(
-                            &mut state.selected_sdf,
-                            SelectedSdf::PreDefined(SdfFuction::CubeRingFrame),
-                            SdfFuction::CubeRingFrame.to_string(),
-                        );
-                        ui.selectable_value(
-                            &mut state.selected_sdf,
-                            SelectedSdf::Custom,
-                            "Custom".to_string(),
-                        );
-                    });
-            });
-
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Isovalue:");
-                ui.add(egui::DragValue::new(&mut state.isovalue).speed(0.1))
-            });
-
-            if state.selected_sdf == SelectedSdf::Custom {
-                ui.label("Custom SDF:");
-                ui.text_edit_multiline(&mut state.sdf_text);
+            match state.visualization_mode {
+                VisualizationMode::Fn => {
+                    draw_fn_ui(ui, state);
+                }
+                VisualizationMode::LoadFromFile => {
+                    draw_load_from_file_ui(ui, state);
+                }
+                VisualizationMode::SpinodalDecomposition => {
+                    draw_spinodal_decomposition_ui(ui, state)
+                }
             }
-
-            if ui.button("Recalculate mesh").clicked() {
-                state.mesh_recalculation_requested = true;
-            };
         });
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SelectedSdf {
-    PreDefined(SdfFuction),
-    Custom,
-}
+fn draw_fn_ui(ui: &mut egui::Ui, state: &mut State) {
+    ui.heading("Function SDF");
 
-impl Default for SelectedSdf {
-    fn default() -> Self {
-        Self::PreDefined(Default::default())
+    ui.label("Grid settings");
+    ui.horizontal(|ui| {
+        ui.label("X from ");
+        ui.add(egui::DragValue::new(&mut state.fn_grid_settings.x_range.0));
+        ui.label(" to ");
+        ui.add(egui::DragValue::new(&mut state.fn_grid_settings.x_range.1));
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Y from ");
+        ui.add(egui::DragValue::new(&mut state.fn_grid_settings.y_range.0));
+        ui.label(" to ");
+        ui.add(egui::DragValue::new(&mut state.fn_grid_settings.y_range.1));
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Z from ");
+        ui.add(egui::DragValue::new(&mut state.fn_grid_settings.z_range.0));
+        ui.label(" to ");
+        ui.add(egui::DragValue::new(&mut state.fn_grid_settings.z_range.1));
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Delta X ");
+        ui.add(egui::DragValue::new(&mut state.fn_grid_settings.delta.0));
+        ui.label(" Y ");
+        ui.add(egui::DragValue::new(&mut state.fn_grid_settings.delta.1));
+        ui.label(" Z ");
+        ui.add(egui::DragValue::new(&mut state.fn_grid_settings.delta.2));
+    });
+
+    ui.separator();
+
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_label("SDF")
+            .selected_text(state.selected_sdf_fn.to_string())
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut state.selected_sdf_fn,
+                    SdfFuction::Sphere,
+                    SdfFuction::Sphere.to_string(),
+                );
+                ui.selectable_value(
+                    &mut state.selected_sdf_fn,
+                    SdfFuction::Plane,
+                    SdfFuction::Plane.to_string(),
+                );
+                ui.selectable_value(
+                    &mut state.selected_sdf_fn,
+                    SdfFuction::Octahedron,
+                    SdfFuction::Octahedron.to_string(),
+                );
+                ui.selectable_value(
+                    &mut state.selected_sdf_fn,
+                    SdfFuction::CubeRingFrame,
+                    SdfFuction::CubeRingFrame.to_string(),
+                );
+            });
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Isovalue: ");
+        ui.add(egui::DragValue::new(&mut state.isovalue));
+    });
+
+    if ui.button("Generate mesh").clicked() {
+        state.construct_sdf_from_fn()
     }
 }
 
-impl Display for SelectedSdf {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SelectedSdf::PreDefined(sdf) => write!(f, "{}", sdf),
-            SelectedSdf::Custom => write!(f, "Custom"),
+fn draw_load_from_file_ui(ui: &mut egui::Ui, state: &mut State) {
+    ui.heading("Load SDF from file");
+    ui.horizontal(|ui| {
+        ui.label("Grid Size (X,Y,Z)");
+        ui.add(egui::DragValue::new(&mut state.selected_grid_dims.x));
+        ui.add(egui::DragValue::new(&mut state.selected_grid_dims.y));
+        ui.add(egui::DragValue::new(&mut state.selected_grid_dims.z));
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Isovalue");
+        ui.add(egui::Slider::new(&mut state.isovalue, 0.0..=1.0));
+    });
+
+    if ui.button("Select file").clicked()
+        && let Some(path) = rfd::FileDialog::new().pick_file()
+    {
+        state.select_sdf_file_path(path);
+    }
+
+    if let Some(path) = &state.selected_sdf_file_path {
+        ui.label(format!(
+            "Selected file:\n{}",
+            path.to_str().unwrap_or("<could not display path>")
+        ));
+        if ui.button("Generate Mesh").clicked()
+            && let Err(err) = state.construct_sdf_from_file()
+        {
+            log::error!("Error loading sdf from file: {err}");
+            state.generate_mesh(state.isovalue);
         }
     }
+}
+
+fn draw_spinodal_decomposition_ui(ui: &mut egui::Ui, state: &mut State) {
+    ui.heading("Spinodal Decomposition Demo");
+
+    ui.horizontal(|ui| {
+        ui.label("Grid Size (X,Y,Z)");
+        ui.add(egui::DragValue::new(&mut state.selected_grid_dims.x));
+        ui.add(egui::DragValue::new(&mut state.selected_grid_dims.y));
+        ui.add(egui::DragValue::new(&mut state.selected_grid_dims.z));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Mesh Generation Method");
+        ui.radio_value(
+            &mut state.mesh_generation_method,
+            GenerationMethod::WithBorders,
+            "With Borders",
+        );
+        ui.radio_value(
+            &mut state.mesh_generation_method,
+            GenerationMethod::Standard,
+            "Standard",
+        );
+    });
+
+    if ui.button("Set grid size").clicked() {
+        state.update_grid_dims();
+        state.randomize_grid_and_generate_mesh();
+    }
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label("dx");
+        ui.add(egui::Slider::new(&mut state.spin_decomp.dx, 0.01..=100.0).logarithmic(true));
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("dt");
+        ui.add(egui::Slider::new(&mut state.spin_decomp.dt, 1e-5..=0.1).logarithmic(true));
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("gamma");
+        ui.add(egui::Slider::new(&mut state.spin_decomp.gamma, 0.01..=100.0).logarithmic(true));
+    });
+
+    ui.horizontal(|ui| {
+        if ui.button("Randomize grid").clicked() {
+            state.randomize_grid_and_generate_mesh();
+        }
+
+        let start_stop_button_label = if state.simulation_running {
+            "Stop simulation"
+        } else {
+            "Start simulation"
+        };
+        if ui.button(start_stop_button_label).clicked() {
+            state.simulation_running = !state.simulation_running;
+        }
+    });
 }

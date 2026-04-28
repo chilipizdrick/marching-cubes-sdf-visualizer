@@ -1,28 +1,33 @@
-use glam::Vec3A;
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::NoUninit)]
 pub struct Vertex {
-    pub position: Vec3A,
-    pub normal: Vec3A,
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
 }
 
 impl Vertex {
-    pub fn new(position: Vec3A, normal: Vec3A) -> Self {
+    #[inline]
+    pub fn new(position: [f32; 3], normal: [f32; 3]) -> Self {
         Self { position, normal }
     }
 }
 
-pub struct MeshData {
+#[derive(Debug)]
+pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
 }
 
-impl MeshData {
+impl Mesh {
     pub fn new() -> Self {
         Self {
             vertices: Vec::new(),
             indices: Vec::new(),
         }
+    }
+
+    pub fn clear(&mut self) {
+        self.vertices.clear();
+        self.indices.clear();
     }
 }

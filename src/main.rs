@@ -1,17 +1,11 @@
-mod app;
+use marching_cubes_sdf_visualizer::App;
+use winit::event_loop::{ControlFlow, EventLoop};
 
-use env_logger::Env;
-use winit::event_loop::EventLoop;
+fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
 
-use crate::app::App;
-
-fn main() {
-    let env = Env::default().filter_or("RUST_LOG", "info");
-    env_logger::init_from_env(env);
-
-    let event_loop = EventLoop::new().unwrap();
-
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App::new();
-
-    event_loop.run_app(&mut app).unwrap();
+    event_loop.run_app(&mut app).map_err(Into::into)
 }

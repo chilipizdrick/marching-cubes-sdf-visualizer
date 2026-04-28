@@ -15,6 +15,8 @@
             wayland
             vulkan-loader
             libxkbcommon
+            glib
+            dbus
           ];
 
           LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath buildInputs}";

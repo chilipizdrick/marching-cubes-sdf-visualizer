@@ -1,7 +1,6 @@
 struct Uniforms {
     model: mat4x4f,
-    view: mat4x4f,
-    proj: mat4x4f,
+    view_proj: mat4x4f,
     normal: mat3x3f,
     camera_pos: vec3f,
 }
@@ -25,32 +24,32 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
     let world_pos = uniforms.model * local_pos;
- 
-    out.world_pos = world_pos.xyz;
-    out.clip_pos = uniforms.proj * uniforms.view * world_pos;
 
-    out.normal = uniforms.normal * vertex.normal; 
+    out.world_pos = world_pos.xyz;
+    out.clip_pos = uniforms.view_proj * world_pos;
+
+    out.normal = uniforms.normal * normalize(vertex.normal);
 
     return out;
 }
 
-const light_dir: vec3f = vec3f(1.0);
-const ambient_color: vec3f = vec3f(0.1);
-const diffuse_color: vec3f = vec3f(0.6);
-const specular_color: vec3f = vec3f(0.6);
+const light_dir: vec3f = vec3f(-1.0, -1.0, 1.0);
+const ambient_color: vec3f = vec3f(0.2);
+const diffuse_color: vec3f = vec3f(0.7);
+const specular_color: vec3f = vec3f(0.7);
 const frag_color: vec4f = vec4f(vec3f(0.75), 1.0);
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    let n = normalize(in.normal);
-    let l = normalize(light_dir);
+    let normal = normalize(in.normal);
+    let light_dir = normalize(light_dir);
 
-    let diffuse = max(dot(n, l), 0.0);
+    let diffuse = max(dot(normal, light_dir), 0.0);
 
     let camera_dir = normalize(uniforms.camera_pos - in.world_pos);
-    let half_dir = normalize(camera_dir + l);
+    let half_dir = normalize(camera_dir + light_dir);
 
-    let specular = pow(max(dot(n, half_dir), 0.0), 8.0);
+    let specular = pow(max(dot(normal, half_dir), 0.0), 8.0);
 
     let lighting_color = ambient_color + (diffuse * diffuse_color) + (specular * specular_color);
 

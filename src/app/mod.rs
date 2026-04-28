@@ -1,105 +1,68 @@
 mod gui;
+mod marching_cubes;
 mod mesh;
-mod raw_loader;
-mod sdfs;
+mod scalar_field;
+mod sdf_functions;
+mod spinoidal_decomposition;
+mod state;
 mod textures;
-mod transforms;
 mod uniforms;
-mod vertex;
 
-use std::{rc::Rc, sync::Arc, time::Instant};
+use std::sync::Arc;
 
-use bumpalo::Bump;
 use bytemuck::bytes_of;
 use egui_wgpu::ScreenDescriptor;
-use exp_rs::{EvalContext, Expression, error::ExprError};
-use glam::{Quat, Vec3A};
-use wgpu::{VertexBufferLayout, util::DeviceExt};
+use wgpu::util::DeviceExt;
 use winit::{
-    application::ApplicationHandler,
-    dpi::{PhysicalPosition, PhysicalSize},
-    event::{MouseScrollDelta, WindowEvent},
+    event::{KeyEvent, WindowEvent},
     event_loop::ActiveEventLoop,
-    window::{Window, WindowAttributes, WindowId},
+    keyboard::{Key, NamedKey},
+    window::{CursorGrabMode, Window, WindowId},
 };
 
 use crate::app::{
-    gui::{EguiRenderer, SelectedSdf},
-    mesh::{Grid, GridBuilder},
-    raw_loader::ScalarField,
-    textures::{ColorTexture, DepthTexture},
-    transforms::{model_transform, projection_transform, view_transform},
-    uniforms::Uniforms,
-    vertex::{MeshData, Vertex},
+    gui::EguiRenderer,
+    mesh::Vertex,
+    state::State,
+    textures::{DepthTexture, MSAATexture},
 };
 
-#[derive(Default)]
-pub struct App {
-    state: Option<State<'static>>,
-}
-
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window_attributes = WindowAttributes::default();
-        let window = event_loop.create_window(window_attributes).unwrap();
-
-        let state = State::new(window);
-        self.state = Some(state);
-    }
-
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        if let Some(state) = &mut self.state {
-            state.window_event(event_loop, id, event);
-        }
-    }
-}
-
-impl App {
-    pub fn new() -> Self {
-        Self { state: None }
-    }
-}
-
-struct State<'a> {
+pub struct AppState<'a> {
+    instance: wgpu::Instance,
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface: wgpu::Surface<'a>,
     surface_config: wgpu::SurfaceConfiguration,
     window: Arc<Window>,
-    uniforms: Uniforms,
     uniforms_buffer: wgpu::Buffer,
     uniforms_bind_group: wgpu::BindGroup,
     render_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     depth_texture: DepthTexture,
-    color_texture: ColorTexture,
-
-    time: f32,
-    last_update: Instant,
-    camera_radius: f32,
+    msaa_texture: MSAATexture,
 
     egui: EguiRenderer,
 
-    mesh: MeshData,
+    state: State,
 }
 
-impl State<'_> {
-    fn new(window: Window) -> Self {
+impl AppState<'_> {
+    pub fn new(window: Window) -> anyhow::Result<Self> {
         let window_size = window.inner_size();
         let window = Arc::new(window);
         let instance = wgpu_instance();
 
-        let surface = instance.create_surface(Arc::clone(&window)).unwrap();
+        let surface = instance.create_surface(Arc::clone(&window))?;
         let adapter_options = wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             ..Default::default()
         };
 
-        let adapter = pollster::block_on(instance.request_adapter(&adapter_options)).unwrap();
+        let adapter = pollster::block_on(instance.request_adapter(&adapter_options))?;
         let device_desc = Default::default();
-        let (device, queue) = pollster::block_on(adapter.request_device(&device_desc)).unwrap();
+        let (device, queue) = pollster::block_on(adapter.request_device(&device_desc))?;
 
         let surface_capabilities = surface.get_capabilities(&adapter);
         let texture_format = surface_capabilities
@@ -121,17 +84,12 @@ impl State<'_> {
 
         surface.configure(&device, &surface_config);
 
-        let camera_pos = Vec3A::splat(3.0);
-
-        let model = model_transform(Vec3A::ONE, Vec3A::ZERO, Quat::IDENTITY);
-        let view = view_transform(camera_pos, Vec3A::ZERO, Vec3A::Z);
         let aspect_ratio = window_size.width as f32 / window_size.height as f32;
-        let proj = projection_transform(std::f32::consts::PI / 2.0, aspect_ratio, 0.1, 100.0);
+        let state = State::new(aspect_ratio);
 
-        let uniforms = Uniforms::new(model, view, proj, camera_pos);
         let uniforms_buffer_desc = wgpu::util::BufferInitDescriptor {
             label: Some("Uniforms Buffer"),
-            contents: bytemuck::bytes_of(&uniforms),
+            contents: bytemuck::bytes_of(&state.uniforms),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         };
         let uniforms_buffer = device.create_buffer_init(&uniforms_buffer_desc);
@@ -161,34 +119,26 @@ impl State<'_> {
         let uniforms_bind_group = device.create_bind_group(&uniforms_bind_group_desc);
         let render_pipeline_layout_desc = wgpu::PipelineLayoutDescriptor {
             label: Some("Pipeline Layout"),
-            bind_group_layouts: &[&uniforms_bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&uniforms_bind_group_layout)],
+            immediate_size: 0,
         };
         let render_pipeline_layout = device.create_pipeline_layout(&render_pipeline_layout_desc);
         let shader_module_desc = wgpu::include_wgsl!("shader.wgsl");
         let shader_module = device.create_shader_module(shader_module_desc);
 
-        let egui = EguiRenderer::new(&device, texture_format, &window);
-
-        let mesh = if std::env::args().len() > 1 {
-            calculate_mesh_from_scalar_field()
-        } else {
-            calculate_mesh(&egui.state).unwrap()
-        };
-
         let vertex_buffer_desc = wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(&mesh.vertices),
+            contents: bytemuck::cast_slice(&state.mesh.vertices),
             usage: wgpu::BufferUsages::VERTEX,
         };
         let vertex_buffer = device.create_buffer_init(&vertex_buffer_desc);
         let index_buffer_desc = wgpu::util::BufferInitDescriptor {
             label: Some("Index Buffer"),
-            contents: bytemuck::cast_slice(&mesh.indices),
+            contents: bytemuck::cast_slice(&state.mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         };
         let index_buffer = device.create_buffer_init(&index_buffer_desc);
-        let vertex_buffer_layout = VertexBufferLayout {
+        let vertex_buffer_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &wgpu::vertex_attr_array![
@@ -216,12 +166,11 @@ impl State<'_> {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DepthTexture::DEPTH_TEXTURE_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
-            // multisample: Default::default(),
             multisample: wgpu::MultisampleState {
                 count: 4,
                 mask: !0,
@@ -237,45 +186,141 @@ impl State<'_> {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         };
         let render_pipeline = device.create_render_pipeline(&render_pipeline_desc);
 
         let depth_texture = DepthTexture::new(&device, &surface_config);
-        let color_texture = ColorTexture::new(&device, &surface_config);
+        let msaa_texture = MSAATexture::new(&device, &surface_config);
 
-        let time = 0.0;
-        let last_update = Instant::now();
+        let egui = EguiRenderer::new(&device, texture_format, &window);
 
-        Self {
+        Ok(Self {
+            instance,
             device,
             queue,
             surface,
             surface_config,
             window,
-            uniforms,
             uniforms_buffer,
             uniforms_bind_group,
             render_pipeline,
             vertex_buffer,
             index_buffer,
             depth_texture,
-            color_texture,
-
-            time,
-            last_update,
-
-            camera_radius: 3.0,
+            msaa_texture,
 
             egui,
 
-            mesh,
+            state,
+        })
+    }
+
+    pub fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        use WindowEvent as WE;
+
+        // log::debug!("Window event: {event:?}");
+
+        let response = self.egui.handle_input(&self.window, &event);
+
+        // log::debug!("egui response: {response:?}");
+
+        if !response.consumed {
+            match &event {
+                WE::CloseRequested => self.handle_close_requested(event_loop),
+                WE::Resized(size) => self.handle_window_resized(size),
+                WE::KeyboardInput {
+                    event: key_event, ..
+                } => self.handle_key_event(key_event),
+                _ => {}
+            }
+        }
+
+        self.state.update();
+
+        if self.state.mesh_changed {
+            self.update_vertex_index_buffers();
+        }
+
+        self.write_uniforms();
+
+        if event == WE::RedrawRequested {
+            self.render();
+        }
+
+        self.window.request_redraw();
+    }
+
+    pub fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        event: winit::event::DeviceEvent,
+    ) {
+        // log::info!("Device event: {event:?}");
+        if self.state.camera_mode_on {
+            use winit::event::DeviceEvent as DE;
+            if let DE::MouseMotion { delta } = event {
+                self.state.handle_mouse_motion(delta);
+            }
         }
     }
 
+    fn handle_close_requested(&self, event_loop: &ActiveEventLoop) {
+        event_loop.exit();
+    }
+
+    fn handle_window_resized(&mut self, size: &winit::dpi::PhysicalSize<u32>) {
+        self.surface_config.width = size.width;
+        self.surface_config.height = size.height;
+        self.surface.configure(&self.device, &self.surface_config);
+        self.depth_texture = DepthTexture::new(&self.device, &self.surface_config);
+        self.msaa_texture = MSAATexture::new(&self.device, &self.surface_config);
+
+        self.state.camera.aspect_ratio = size.width as f32 / size.height as f32;
+        self.state.uniforms.view_proj = self.state.camera.view_proj_matrix();
+    }
+
+    fn handle_key_event(&mut self, key_event: &KeyEvent) {
+        if key_event.logical_key == Key::Named(NamedKey::Escape) && key_event.state.is_pressed() {
+            self.state.camera_mode_on = !self.state.camera_mode_on;
+            if self.state.camera_mode_on {
+                self.window.set_cursor_grab(CursorGrabMode::Locked).unwrap();
+                self.window.set_cursor_visible(false);
+            } else {
+                self.window.set_cursor_grab(CursorGrabMode::None).unwrap();
+                self.window.set_cursor_visible(true);
+            }
+        }
+
+        self.state.handle_key_event(key_event)
+    }
+
     fn render(&mut self) {
-        let output = self.surface.get_current_texture().unwrap();
+        use wgpu::CurrentSurfaceTexture as CST;
+
+        let output = self.surface.get_current_texture();
+        match output {
+            CST::Success(output) => self.draw_frame(output),
+            CST::Suboptimal(output) => {
+                self.surface.configure(&self.device, &self.surface_config);
+                self.draw_frame(output);
+            }
+            CST::Outdated => {
+                self.surface.configure(&self.device, &self.surface_config);
+            }
+            CST::Timeout | CST::Occluded | CST::Validation => {}
+            CST::Lost => match self.instance.create_surface(self.window.clone()) {
+                Ok(surface) => {
+                    self.surface = surface;
+                    self.surface.configure(&self.device, &self.surface_config);
+                }
+                Err(e) => log::error!("Error creating surface: {e}"),
+            },
+        }
+    }
+
+    fn draw_frame(&mut self, output: wgpu::SurfaceTexture) {
         let texture_view_desc = wgpu::TextureViewDescriptor::default();
         let view = output.texture.create_view(&texture_view_desc);
 
@@ -284,21 +329,31 @@ impl State<'_> {
         };
         let mut encoder = self.device.create_command_encoder(&command_encoder_desc);
 
-        if !self.mesh.vertices.is_empty() {
-            self.draw_scene(&mut encoder, &view);
+        // if !self.state.mesh.vertices.is_empty() {
+        //     self.draw_mesh(&mut encoder, &mut rpass);
+        // }
+        self.draw_mesh(&mut encoder, &view);
+
+        if !self.state.camera_mode_on {
+            self.draw_ui(&mut encoder, &view);
         }
-        self.draw_ui(&mut encoder, &view);
 
         self.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         output.present();
     }
 
-    fn draw_scene(&self, encoder: &mut wgpu::CommandEncoder, resolve_target: &wgpu::TextureView) {
+    fn write_uniforms(&self) {
+        let buffer = &self.uniforms_buffer;
+        self.queue
+            .write_buffer(buffer, 0, bytes_of(&self.state.uniforms))
+    }
+
+    fn draw_mesh(&self, encoder: &mut wgpu::CommandEncoder, resolve_target: &wgpu::TextureView) {
         let render_pass_desc = wgpu::RenderPassDescriptor {
             label: Some("Render Pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &self.color_texture.view,
+                view: &self.msaa_texture.view,
                 depth_slice: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -317,21 +372,23 @@ impl State<'_> {
 
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         };
 
-        {
-            let mut rpass = encoder.begin_render_pass(&render_pass_desc);
+        let mut rpass = encoder.begin_render_pass(&render_pass_desc);
+        if !self.state.mesh.vertices.is_empty() {
             rpass.set_pipeline(&self.render_pipeline);
             rpass.set_bind_group(0, &self.uniforms_bind_group, &[]);
             rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             rpass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            rpass.draw_indexed(0..(self.mesh.indices.len() as u32), 0, 0..1);
+            rpass.draw_indexed(0..(self.state.mesh.indices.len() as u32), 0, 0..1);
         }
     }
 
     fn draw_ui(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+        let window_size = self.window.inner_size();
         let screen_descriptor = ScreenDescriptor {
-            size_in_pixels: [self.surface_config.width, self.surface_config.height],
+            size_in_pixels: [window_size.width, window_size.height],
             pixels_per_point: self.window.scale_factor() as f32,
         };
 
@@ -342,101 +399,25 @@ impl State<'_> {
             &self.window,
             view,
             screen_descriptor,
-            self::gui::main_window,
-        );
+            &mut self.state,
+        )
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
-        use WindowEvent as WE;
-
-        self.update_time();
-
-        // log::info!("Window event: {event:?}");
-
-        match event {
-            WE::CloseRequested => event_loop.exit(),
-            WE::Resized(size) => self.handle_window_resized(size),
-            WE::RedrawRequested => self.render(),
-            WE::MouseWheel { delta, .. } => self.handle_mouse_wheel(delta),
-
-            _ => {}
-        }
-
-        self.egui.handle_input(&self.window, &event);
-        self.update_state();
-
-        self.write_uniforms();
-        self.window.request_redraw();
-    }
-
-    fn update_time(&mut self) {
-        let now = Instant::now();
-        self.time += (now - self.last_update).as_secs_f32();
-        self.last_update = now;
-    }
-
-    fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) {
-        let PhysicalSize { height, .. } = self.window.inner_size();
-        let multiplier = multiplier_from_mouse_delta(delta, height as f32);
-        self.camera_radius *= multiplier;
-    }
-
-    fn update_state(&mut self) {
-        let camera_pos = Vec3A::new(
-            self.camera_radius * self.time.cos(),
-            self.camera_radius * self.time.sin(),
-            1.5,
-        );
-        self.uniforms.camera_pos = camera_pos;
-        self.uniforms.view = view_transform(camera_pos, Vec3A::ZERO, Vec3A::Z);
-
-        let gui_state = &mut self.egui.state;
-        if gui_state.mesh_recalculation_requested {
-            gui_state.mesh_recalculation_requested = false;
-
-            match calculate_mesh(gui_state) {
-                Ok(mesh) => {
-                    self.mesh = mesh;
-                    self.update_buffers();
-                }
-                Err(e) => log::error!("Error calculating mesh: {}", e),
-            }
-        }
-    }
-
-    fn update_buffers(&mut self) {
+    fn update_vertex_index_buffers(&mut self) {
         let vertex_buffer_desc = wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(&self.mesh.vertices),
+            contents: bytemuck::cast_slice(&self.state.mesh.vertices),
             usage: wgpu::BufferUsages::VERTEX,
         };
         self.vertex_buffer = self.device.create_buffer_init(&vertex_buffer_desc);
         let index_buffer_desc = wgpu::util::BufferInitDescriptor {
             label: Some("Index Buffer"),
-            contents: bytemuck::cast_slice(&self.mesh.indices),
+            contents: bytemuck::cast_slice(&self.state.mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         };
         self.index_buffer = self.device.create_buffer_init(&index_buffer_desc);
-    }
 
-    fn handle_window_resized(&mut self, size: winit::dpi::PhysicalSize<u32>) {
-        self.surface_config.width = size.width;
-        self.surface_config.height = size.height;
-        self.surface.configure(&self.device, &self.surface_config);
-        self.depth_texture = DepthTexture::new(&self.device, &self.surface_config);
-        self.color_texture = ColorTexture::new(&self.device, &self.surface_config);
-
-        self.uniforms.proj = projection_transform(
-            std::f32::consts::PI / 2.0,
-            size.width as f32 / size.height as f32,
-            0.1,
-            100.0,
-        );
-    }
-
-    fn write_uniforms(&self) {
-        let buffer = &self.uniforms_buffer;
-        self.queue.write_buffer(buffer, 0, bytes_of(&self.uniforms))
+        self.state.mesh_changed = false;
     }
 }
 
@@ -450,100 +431,10 @@ fn wgpu_instance() -> wgpu::Instance {
     let desc = wgpu::InstanceDescriptor {
         backends,
         flags,
-        ..Default::default()
+        memory_budget_thresholds: Default::default(),
+        backend_options: Default::default(),
+        display: None,
     };
 
-    wgpu::Instance::new(&desc)
-}
-
-fn calculate_mesh(gui_state: &gui::State) -> Result<MeshData, ExprError> {
-    let mut grid = Grid::builder()
-        .x_range(gui_state.x_range)
-        .y_range(gui_state.y_range)
-        .z_range(gui_state.z_range)
-        .xyz_delta(gui_state.delta)
-        .build()
-        .unwrap();
-
-    let isovalue = gui_state.isovalue;
-
-    let mesh = match gui_state.selected_sdf {
-        SelectedSdf::PreDefined(sdf) => {
-            let mut sdf_fn = sdf.sdf_fn();
-            grid.generate_mesh_from_fn(&mut sdf_fn, isovalue)
-        }
-        SelectedSdf::Custom => {
-            let arena = Bump::new();
-            let ctx = Rc::new(EvalContext::new());
-            let mut builder = Expression::new(&arena);
-            builder.add_parameter("x", 0.0).unwrap();
-            builder.add_parameter("y", 0.0).unwrap();
-            builder.add_parameter("z", 0.0).unwrap();
-            builder.add_expression(&gui_state.sdf_text)?;
-
-            let mut sdf_fn = |x, y, z| {
-                builder.set("x", x as f64).unwrap();
-                builder.set("y", y as f64).unwrap();
-                builder.set("z", z as f64).unwrap();
-                builder.eval(&ctx).unwrap();
-                builder.get_result(0).unwrap() as f32
-            };
-
-            grid.generate_mesh_from_fn(&mut sdf_fn, isovalue)
-        }
-    };
-
-    log::info!(
-        "Generated mesh with {} vertices and {} indices",
-        mesh.vertices.len(),
-        mesh.indices.len()
-    );
-
-    Ok(mesh)
-}
-
-fn calculate_mesh_from_scalar_field() -> MeshData {
-    let args: Vec<String> = std::env::args().collect();
-    let field_x_len = args[2].parse().unwrap();
-    let field_y_len = args[3].parse().unwrap();
-    let field_z_len = args[4].parse().unwrap();
-
-    let field = ScalarField::read_from_u8_yzx_file_with_size(
-        &args[1],
-        field_x_len,
-        field_y_len,
-        field_z_len,
-    )
-    .unwrap();
-
-    let mut grid = GridBuilder::new()
-        .x_range((-1.0, 1.0))
-        .y_range((-1.0, 1.0))
-        .z_range((-1.0, 1.0))
-        .xyz_delta((
-            2.0 / (field_x_len - 1) as f32,
-            2.0 / (field_y_len - 1) as f32,
-            2.0 / (field_z_len - 1) as f32,
-        ))
-        .build()
-        .unwrap();
-
-    grid.generate_mesh_from_scalar_field(field, 0.5)
-}
-
-fn multiplier_from_mouse_delta(delta: MouseScrollDelta, window_height: f32) -> f32 {
-    const PIXEL_DELTA_SCROLL_SENSITIVITY: f32 = 5.0;
-
-    match delta {
-        MouseScrollDelta::LineDelta(_, y) => match y {
-            ..0.0 => 0.9,
-            0.0.. => 1.1,
-            _ => 1.0,
-        },
-        MouseScrollDelta::PixelDelta(PhysicalPosition { y, .. }) => match y {
-            ..0.0 => 1.0 - (y as f32 / window_height * PIXEL_DELTA_SCROLL_SENSITIVITY).abs(),
-            0.0.. => 1.0 + (y as f32 / window_height * PIXEL_DELTA_SCROLL_SENSITIVITY).abs(),
-            _ => 1.0,
-        },
-    }
+    wgpu::Instance::new(desc)
 }
