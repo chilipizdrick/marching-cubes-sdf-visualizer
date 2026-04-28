@@ -17,3 +17,4 @@ It is by no means a complete tool, it is more of an excersise in learning comput
 | <kbd>Shift Left</kbd> | Sprint |
 | <kbd>Esc</kbd> | Switch between camera/GUI mode |
 
+The scalar field datasets can be taken from here http://klacansky.com/open-scivis-datasets/. If grid size is specified incorrectly, the program will crash)
